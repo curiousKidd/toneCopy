@@ -49,7 +49,7 @@ services:
       PORT: 3012
       DATABASE_URL: postgresql://tonecopy:dev_password_change_in_prod@postgres:5432/tonecopy
       REDIS_URL: redis://redis:6379
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-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}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
       CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-dfnnldp3n}
       CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-519259346214933}
       CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-PHqzODk-HcS0QEELLRWHSSokAog}
