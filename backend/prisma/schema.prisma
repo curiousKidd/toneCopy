@@ -1,0 +1,72 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String              @id @default(uuid())
+  email             String?             @unique
+  createdAt         DateTime            @default(now()) @map("created_at")
+  preferences       Json?               @db.JsonB
+  subscriptionTier  SubscriptionTier    @default(FREE) @map("subscription_tier")
+
+  profiles          CorrectionProfile[]
+
+  @@map("users")
+}
+
+enum SubscriptionTier {
+  FREE
+  PREMIUM
+  ENTERPRISE
+}
+
+model CorrectionProfile {
+  id                 String              @id @default(uuid())
+  userId             String              @map("user_id")
+  profileName        String              @map("profile_name")
+  parameters         Json                @db.JsonB
+  originalImageUrls  String[]            @map("original_image_urls")
+  adjustedImageUrls  String[]            @map("adjusted_image_urls")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  history            CorrectionHistory[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("correction_profiles")
+}
+
+model CorrectionHistory {
+  id                 String              @id @default(uuid())
+  profileId          String              @map("profile_id")
+  originalImageUrl   String              @map("original_image_url")
+  correctedImageUrl  String              @map("corrected_image_url")
+  processingTimeMs   Int                 @map("processing_time_ms")
+  createdAt          DateTime            @default(now()) @map("created_at")
+
+  profile            CorrectionProfile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId, createdAt(sort: Desc)])
+  @@map("correction_history")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([token])
+  @@index([userId])
+  @@map("sessions")
+}

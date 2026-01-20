@@ -1,0 +1,93 @@
+# version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: tonecopy-postgres
+    environment:
+      POSTGRES_USER: tonecopy
+      POSTGRES_PASSWORD: dev_password_change_in_prod
+      POSTGRES_DB: tonecopy
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tonecopy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tonecopy-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: tonecopy-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - tonecopy-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tonecopy-backend
+    environment:
+      NODE_ENV: production
+      PORT: 3012
+      DATABASE_URL: postgresql://tonecopy:dev_password_change_in_prod@postgres:5432/tonecopy
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-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}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-dfnnldp3n}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-519259346214933}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-PHqzODk-HcS0QEELLRWHSSokAog}
+      ALLOWED_ORIGINS: http://localhost:3002,http://localhost:5173,http://tonecopy-frontend
+      RATE_LIMIT_WINDOW_MS: 3600000
+      RATE_LIMIT_MAX_REQUESTS: 50
+      LOG_LEVEL: info
+    ports:
+      - "3012:3012"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tonecopy-network
+    restart: unless-stopped
+
+  # Frontend Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: tonecopy-frontend
+    ports:
+      - "3002:80"
+    depends_on:
+      - backend
+    networks:
+      - tonecopy-network
+    restart: unless-stopped
+
+networks:
+  tonecopy-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
