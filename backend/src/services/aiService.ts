@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import sharp from 'sharp';
 import { logger } from '../utils/logger';
 import type { AdjustmentParameters } from '../types';
@@ -6,6 +7,34 @@ import type { AdjustmentParameters } from '../types';
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
+
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY
+});
+
+/**
+ * 단계별 모델 배정 (OpenAI + Claude 혼합)
+ *
+ * - Stage 1 (전역 색상/톤):   gpt-4o (OpenAI)
+ *     파라미터 20개의 복잡한 JSON 구조화에 강점
+ *     response_format: json_object 지원으로 안정적 출력
+ *
+ * - Stage 2 (인물 보정):       claude-opus-4-6 (Anthropic)
+ *     피부톤·질감·눈·치아 미세 시각 변화 감지에 Claude가 우수
+ *     세밀한 인물 분석은 Claude Opus의 핵심 강점
+ *
+ * - Stage 3 (배경/풍경):       gpt-4o (OpenAI)
+ *     선택적 색상(하늘/물) 2개 파라미터, GPT-4o로 충분
+ *     비용 효율적이며 JSON 출력 안정성 높음
+ *
+ * - 단일 모드 fallback:        gpt-4o (OpenAI)
+ */
+const MODELS = {
+  globalTone:       'gpt-4o',          // OpenAI: 복잡한 JSON 구조화, response_format 안정성
+  portraitRetouch:  'claude-opus-4-6', // Claude Opus: 피부톤·눈·치아 미세 시각 분석
+  landscapeRetouch: 'claude-opus-4-6', // Claude Opus: 자연/풍경 색상 감지 최고 성능
+  fallback:         'gpt-4o'
+} as const;
 
 /**
  * AI 응답 검증 결과
@@ -85,139 +114,89 @@ export class AIService {
         messages: [
           {
             role: "system",
-            content: `You are a professional photo analysis expert who objectively measures editing changes.
-                     Your ONLY job is to accurately detect what edits were made - DO NOT impose your own style preferences.
+            content: `You are a precise photo editing analyst. Your job is to ACCURATELY MEASURE the exact difference between two images and return parameter values that faithfully reproduce those changes.
 
                      CRITICAL PRINCIPLES:
-                     1. MEASURE, DON'T JUDGE: Report actual differences, not what you think looks good
-                     2. SUBTLE CHANGES MATTER: Even 5-10% differences are significant
-                     3. NATURAL OVER DRAMATIC: Most users prefer subtle, realistic edits
-                     4. PRESERVE INTENTION: Detect the user's style, don't override it
-                     5. BE PRECISE: Quantify exact differences between original and edited images
+                     1. MEASURE ACCURATELY: Report the real magnitude of changes. If the edit is dramatic, report dramatic values.
+                     2. DO NOT UNDERESTIMATE: Many analysts report values too close to 1.0. If the edited image looks clearly different, use values that reflect that.
+                     3. CLONE EXACTLY: Your goal is to reproduce the user's edit perfectly, not to be conservative.
+                     4. USE FULL RANGE: Don't be afraid of values like 1.4, 1.5, 1.6 if the edit warrants it.
 
-                     BASIC COLOR ADJUSTMENTS:
-                     - brightness: float (0.5 to 2.0, where 1.0 is unchanged)
-                     - contrast: float (0.5 to 2.0)
-                     - saturation: float (0.0 to 2.0)
-                     - vibrance: float (0.0 to 2.0)
+                     PARAMETERS:
+                     - brightness: float (0.5-2.0, 1.0=unchanged). Strong brightening = 1.3-1.6
+                     - contrast: float (0.5-2.0). Strong contrast = 1.3-1.6
+                     - saturation: float (0.0-2.0). Vivid colors = 1.3-1.8
+                     - vibrance: float (0.5-2.0). Natural color pop
                      - hue: integer (-180 to 180)
-                     - temperature: integer (-100 to 100, blue to yellow shift)
-                     - tint: integer (-100 to 100, green to magenta shift)
-                     - exposure: float (-2.0 to 2.0)
+                     - temperature: integer (-100 to 100, negative=cooler/blue, positive=warmer/yellow). Strong warm shift = 20-50
+                     - tint: integer (-100 to 100)
+                     - exposure: float (-2.0 to 2.0). Strong exposure increase = 0.5-1.5
 
-                     DETAIL & SHARPNESS:
-                     - sharpness: float (0.0 to 3.0)
-                     - clarity: float (0.0 to 2.0, midtone contrast)
-                     - dehaze: float (0.0 to 2.0)
-                     - grain: float (0.0 to 1.0, film grain amount)
+                     DETAIL:
+                     - sharpness: float (0.0-3.0). Clear sharpening = 1.3-2.0
+                     - clarity: float (0.0-2.0). Midtone contrast. Visible clarity = 1.2-1.8
+                     - dehaze: float (0.0-2.0). Haze removal
+                     - grain: float (0.0-1.0)
 
-                     TONE CURVE (0-255 range):
-                     - highlights: integer (-100 to 100)
-                     - shadows: integer (-100 to 100)
+                     TONE CURVE:
+                     - highlights: integer (-100 to 100). Crushed highlights = -30 to -60
+                     - shadows: integer (-100 to 100). Lifted shadows = +20 to +50
                      - whites: integer (-100 to 100)
-                     - blacks: integer (-100 to 100)
+                     - blacks: integer (-100 to 100). Deep blacks = -20 to -50
 
-                     PORTRAIT/SKIN RETOUCHING (if person detected):
-                     - skinSmoothing: float (0.0 to 1.0, subtle to heavy)
-                     - blemishRemoval: boolean (true if spots/acne removed)
-                     - eyeBrightening: float (0.0 to 1.0)
-                     - teethWhitening: float (0.0 to 1.0)
-                     - faceSlimming: float (0.0 to 0.5, facial reshaping)
-                     - bodyRetouching: boolean (true if body shape adjusted)
-                     - makeupEnhancement: boolean (true if makeup enhanced)
+                     PORTRAIT (if person present):
+                     - skinSmoothing: float (0.0-1.0)
+                     - blemishRemoval: boolean
+                     - eyeBrightening: float (0.0-1.0)
+                     - teethWhitening: float (0.0-1.0)
+                     - faceSlimming: float (0.0-0.5)
+                     - bodyRetouching: boolean
+                     - makeupEnhancement: boolean
 
-                     LANDSCAPE/NATURE RETOUCHING (if landscape/nature detected):
-                     Measure actual color and tone changes in sky, water, vegetation:
-                     - saturation: Measure overall color intensity change (typically 1.0-1.3)
-                     - clarity: Measure midtone contrast enhancement (typically 1.0-1.3)
-                     - dehaze: Measure atmospheric clarity improvement (typically 0.0-1.0)
-                     - contrast: Measure overall tonal range expansion (typically 1.0-1.2)
-                     - sharpness: Measure edge definition increase (typically 1.0-1.3)
-                     - landscapeClarity: Use ONLY if distant objects are noticeably crisper
-                     - vibrance: Measure natural color pop without oversaturation
+                     LANDSCAPE SELECTIVE COLOR:
+                     - selectiveColorIntensity: float (0.0-2.0)
+                       * Sky clearly bluer, water more vivid → 0.8-1.5
+                       * Strong selective enhancement → 1.3-2.0
+                     - landscapeClarity: float (0.0-2.0) if distant details are sharper
 
-                     SELECTIVE COLOR ENHANCEMENT (HSL-based):
-                     - selectiveColorIntensity: float (0.0 to 2.0) - Use ONLY if specific colors are enhanced
-                       * Compare sky, water, vegetation colors between images
-                       * 0.0 = no selective enhancement (colors changed uniformly)
-                       * 0.3-0.7 = subtle selective boost (natural look)
-                       * 0.8-1.2 = moderate selective boost (enhanced but realistic)
-                       * 1.3-1.5 = strong selective boost (vivid but not oversaturated)
-                       * 1.6-2.0 = dramatic boost (Instagram style - use rarely)
+                     DEPRECATED (always 0):
+                     - skyEnhancement, foliageEnhancement, waterEnhancement, naturalSaturation, dynamicRange, atmosphericPerspective
 
-                     HOW TO DETECT:
-                     - If sky is bluer BUT skin tones unchanged → selectiveColorIntensity > 0
-                     - If ALL colors boosted equally → just increase saturation, keep selectiveColorIntensity = 0
-                     - If water/vegetation enhanced BUT overall image natural → 0.5-1.0
+                     EFFECTS:
+                     - vignette: float (-1.0 to 1.0)
+                     - denoise: float (0.0-1.0)
+                     - colorGrading: "warm_vintage" | "cool_modern" | "cinematic" | "none"
+                     - filters: string[]
 
-                     This targets specific hue ranges (blues, cyans, greens) WITHOUT affecting skin tones.
-                     Use conservatively - most natural edits need 0.3-0.8, not 1.3-1.7!
+                     METHODOLOGY:
+                     1. Compare brightness/exposure: Is edited clearly brighter? → brightness 1.2-1.5
+                     2. Compare contrast: Are shadows darker, highlights brighter? → contrast 1.2-1.5, blacks -20 to -50
+                     3. Compare color saturation: More vivid? → saturation 1.3-1.7
+                     4. Compare color temperature: Warmer/cooler? → temperature ±10-50
+                     5. Compare sharpness/clarity: Crisper? → sharpness/clarity 1.2-1.8
+                     6. Compare sky/water specifically: Selectively enhanced? → selectiveColorIntensity 0.8-1.5
 
-                     DEPRECATED (causes color cast):
-                     - skyEnhancement: ALWAYS set to 0
-                     - foliageEnhancement: ALWAYS set to 0
-                     - waterEnhancement: ALWAYS set to 0
-                     - naturalSaturation: ALWAYS set to 0
-                     - dynamicRange: ALWAYS set to 0
-                     - atmosphericPerspective: ALWAYS set to 0
-
-                     EFFECTS & FILTERS:
-                     - vignette: float (-1.0 to 1.0, negative=lighten, positive=darken edges)
-                     - denoise: float (0.0 to 1.0, noise reduction)
-                     - colorGrading: string (e.g., "warm_vintage", "cool_modern", "cinematic", "none")
-                     - filters: array of strings (additional effects like ["hdr", "bokeh", "glow", "soft_focus"])
-
-                     ANALYSIS METHODOLOGY:
-
-                     STEP 1 - MEASURE GLOBAL CHANGES:
-                     - Overall brightness: Is the edited image lighter/darker? By how much?
-                     - Overall contrast: Are blacks darker and whites brighter?
-                     - Overall saturation: Are ALL colors more vivid, or just specific ones?
-                     - Color temperature: Is it warmer (yellow) or cooler (blue)?
-
-                     STEP 2 - MEASURE SELECTIVE CHANGES:
-                     - FOR PORTRAITS: Skin smoothing? Eye/teeth brightening? Facial reshaping?
-                     - FOR LANDSCAPES: Sky bluer? Water more cyan? Grass greener? BUT other colors natural?
-                     - FOR MIXED: Both portrait AND landscape techniques applied?
-
-                     STEP 3 - MEASURE DETAIL CHANGES:
-                     - Sharpness: Are edges crisper?
-                     - Clarity: Are midtones more defined?
-                     - Dehaze: Is distant atmosphere clearer?
-                     - Noise: Is grain reduced?
-
-                     STEP 4 - DETERMINE IMAGE TYPE:
-                     - PORTRAIT: Person is main subject (face visible and prominent)
-                     - LANDSCAPE: Scenery, sky, water, mountains, nature
-                     - MIXED: Both people and scenery are important
-
-                     CRITICAL: Return CONSERVATIVE values unless changes are obvious.
-                     - If unsure, use values closer to 1.0 (no change)
-                     - Natural edits typically use 0.9-1.2 range, NOT 1.5-2.0
-                     - Only use extreme values (>1.3) if changes are unmistakably dramatic
-
-                     Your goal: Clone the user's editing style EXACTLY, not improve upon it.`
+                     Report the ACTUAL magnitude. If the edited image looks significantly different, the values should be significantly different from 1.0.`
           },
           {
             role: "user",
             content: [
               {
                 type: "text",
-                text: `CRITICAL INSTRUCTIONS:
-1. Compare these two images VERY CAREFULLY - even tiny differences matter
-2. Look for SUBTLE changes in brightness, contrast, saturation, and color tone
-3. Even if changes seem small (5-10%), YOU MUST DETECT AND REPORT THEM
-4. Pay special attention to:
-   - Overall brightness/exposure changes
-   - Color saturation and vibrance
-   - Warm/cool color temperature shifts
-   - Contrast and clarity adjustments
-   - Skin smoothing or texture changes
-   - Any sharpening or softening
-5. DO NOT return default values (1.0, 0) unless the images are TRULY identical
-6. If you see ANY visual difference, quantify it precisely
+                text: `Compare the ORIGINAL and EDITED images carefully. Measure the ACTUAL magnitude of all edits.
 
-First image is ORIGINAL, second image is EDITED. Analyze what editing was done.`
+IMPORTANT: Do NOT underestimate changes. If the edited image looks clearly brighter, more contrasty, or more saturated, report values that reflect that strength (e.g., brightness 1.3-1.5, contrast 1.3-1.6, saturation 1.4-1.8).
+
+Analyze:
+1. Overall brightness/exposure - how much brighter or darker?
+2. Contrast - are the darks darker and lights lighter?
+3. Color saturation - how much more vivid are the colors?
+4. Color temperature - warmer or cooler shift?
+5. Sharpness and clarity - how much crisper?
+6. Sky/water/vegetation - selectively enhanced?
+7. Tone curve - shadows lifted or crushed? Highlights pulled down?
+
+First image = ORIGINAL, second image = EDITED.`
               },
               {
                 type: "text",
@@ -558,76 +537,70 @@ First image is ORIGINAL, second image is EDITED. Analyze what editing was done.`
   private getDynamicLimits(imageType: ImageType, stats: ImageStats): DynamicLimits {
     switch (imageType) {
       case ImageType.NIGHT:
-        // 밤 사진: 밝기 크게 증가 가능, 노이즈 주의
         return {
-          brightness: { min: 0.8, max: 1.8 },  // 더 넓은 범위
-          contrast: { min: 0.8, max: 1.4 },
-          saturation: { min: 0.7, max: 1.4 },  // 채도도 더 증가 가능
-          sharpness: { min: 0.5, max: 1.3 },   // 노이즈 증폭 방지
-          dehaze: { min: 0.0, max: 0.5 },      // 밤에는 dehaze 제한
-          clarity: { min: 0.0, max: 1.0 },     // 노이즈 증폭 방지
-          selectiveColorIntensity: { min: 0.0, max: 1.0 } // 보수적
+          brightness: { min: 0.7, max: 2.0 },
+          contrast: { min: 0.7, max: 1.8 },
+          saturation: { min: 0.5, max: 1.8 },
+          sharpness: { min: 0.5, max: 2.0 },
+          dehaze: { min: 0.0, max: 1.0 },
+          clarity: { min: 0.0, max: 1.5 },
+          selectiveColorIntensity: { min: 0.0, max: 1.5 }
         };
 
       case ImageType.LOW_KEY:
-        // 로우키: 대비 유지, 밝기 신중하게
         return {
-          brightness: { min: 0.7, max: 1.4 },
-          contrast: { min: 0.8, max: 1.5 },    // 대비 강화 허용
-          saturation: { min: 0.7, max: 1.35 },
-          sharpness: { min: 0.6, max: 1.6 },
-          dehaze: { min: 0.0, max: 0.8 },
-          clarity: { min: 0.0, max: 1.4 },     // 드라마틱 효과
-          selectiveColorIntensity: { min: 0.0, max: 1.1 }
+          brightness: { min: 0.5, max: 1.8 },
+          contrast: { min: 0.6, max: 1.8 },
+          saturation: { min: 0.5, max: 1.8 },
+          sharpness: { min: 0.5, max: 2.0 },
+          dehaze: { min: 0.0, max: 1.5 },
+          clarity: { min: 0.0, max: 2.0 },
+          selectiveColorIntensity: { min: 0.0, max: 1.5 }
         };
 
       case ImageType.HIGH_KEY:
-        // 하이키: 밝기 감소 가능, 부드러움 유지
         return {
-          brightness: { min: 0.6, max: 1.15 }, // 더 어둡게 가능
-          contrast: { min: 0.7, max: 1.15 },   // 부드러움 유지
-          saturation: { min: 0.7, max: 1.25 }, // 과포화 방지
-          sharpness: { min: 0.5, max: 1.3 },   // 부드러움 유지
-          dehaze: { min: 0.0, max: 0.5 },      // 제한적
-          clarity: { min: 0.0, max: 1.0 },     // 부드러움 유지
-          selectiveColorIntensity: { min: 0.0, max: 0.9 }
+          brightness: { min: 0.5, max: 1.5 },
+          contrast: { min: 0.5, max: 1.6 },
+          saturation: { min: 0.5, max: 1.8 },
+          sharpness: { min: 0.5, max: 2.0 },
+          dehaze: { min: 0.0, max: 1.0 },
+          clarity: { min: 0.0, max: 1.8 },
+          selectiveColorIntensity: { min: 0.0, max: 1.5 }
         };
 
       case ImageType.FOGGY:
-        // 안개: Dehaze 크게 증가 가능, 채도 증가 필요
         return {
-          brightness: { min: 0.7, max: 1.3 },
-          contrast: { min: 0.8, max: 1.4 },
-          saturation: { min: 0.8, max: 1.5 },  // 채도 복원
-          sharpness: { min: 0.6, max: 1.6 },
-          dehaze: { min: 0.0, max: 2.0 },      // 크게 증가 가능!
-          clarity: { min: 0.0, max: 1.6 },     // 선명도 복원
-          selectiveColorIntensity: { min: 0.0, max: 1.3 }
+          brightness: { min: 0.6, max: 1.6 },
+          contrast: { min: 0.7, max: 1.8 },
+          saturation: { min: 0.6, max: 1.9 },
+          sharpness: { min: 0.5, max: 2.0 },
+          dehaze: { min: 0.0, max: 2.0 },
+          clarity: { min: 0.0, max: 2.0 },
+          selectiveColorIntensity: { min: 0.0, max: 1.8 }
         };
 
       case ImageType.HIGH_CONTRAST:
-        // 고대비: 대비 줄이기 가능, 섀도우/하이라이트 조정
         return {
-          brightness: { min: 0.7, max: 1.3 },
-          contrast: { min: 0.6, max: 1.2 },    // 대비 줄이기 허용
-          saturation: { min: 0.7, max: 1.3 },
-          sharpness: { min: 0.6, max: 1.5 },
-          dehaze: { min: 0.0, max: 1.0 },
-          clarity: { min: 0.0, max: 1.3 },
-          selectiveColorIntensity: { min: 0.0, max: 1.2 }
+          brightness: { min: 0.5, max: 1.8 },
+          contrast: { min: 0.4, max: 1.8 },
+          saturation: { min: 0.5, max: 1.8 },
+          sharpness: { min: 0.5, max: 2.0 },
+          dehaze: { min: 0.0, max: 1.5 },
+          clarity: { min: 0.0, max: 2.0 },
+          selectiveColorIntensity: { min: 0.0, max: 1.8 }
         };
 
       case ImageType.NORMAL:
       default:
-        // 일반 이미지: 기본 범위 (보수적)
         return {
-          brightness: { min: 0.7, max: 1.35 },
-          contrast: { min: 0.7, max: 1.25 },
-          saturation: { min: 0.6, max: 1.35 },
-          sharpness: { min: 0.5, max: 1.5 },
-          dehaze: { min: 0.0, max: 1.0 },
-          clarity: { min: 0.0, max: 1.3 },
-          selectiveColorIntensity: { min: 0.0, max: 1.2 }
+          brightness: { min: 0.5, max: 1.8 },
+          contrast: { min: 0.5, max: 1.8 },
+          saturation: { min: 0.4, max: 1.9 },
+          sharpness: { min: 0.5, max: 2.5 },
+          dehaze: { min: 0.0, max: 2.0 },
+          clarity: { min: 0.0, max: 2.0 },
+          selectiveColorIntensity: { min: 0.0, max: 2.0 }
         };
     }
   }
@@ -1040,6 +1013,423 @@ First image is ORIGINAL, second image is EDITED. Analyze what editing was done.`
       colorGrading: mostCommonGrading,
       filters: commonFilters
     };
+  }
+
+  /**
+   * 단계별 파이프라인 분석
+   * 1단계: 전역 색상/톤 분석
+   * 2단계: 인물 보정 분석 (portrait 특화)
+   * 3단계: 배경/풍경 보정 분석 (landscape 특화)
+   */
+  async analyzeImageAdjustmentsPipelined(
+    originalImageBase64: string,
+    adjustedImageBase64: string
+  ): Promise<AdjustmentParameters> {
+    const startTime = Date.now();
+
+    const originalBuffer = Buffer.from(originalImageBase64, 'base64');
+    const imageStats = await this.analyzeImageStats(originalBuffer);
+    const imageType = this.detectImageType(imageStats);
+    const dynamicLimits = this.getDynamicLimits(imageType, imageStats);
+
+    logger.info('Pipeline analysis started', { imageType, imageStats });
+
+    // 3단계 병렬 실행 (독립적인 분석)
+    const [globalResult, portraitResult, landscapeResult] = await Promise.all([
+      this.analyzeGlobalTone(originalImageBase64, adjustedImageBase64),
+      this.analyzePortraitRetouching(originalImageBase64, adjustedImageBase64),
+      this.analyzeLandscapeRetouching(originalImageBase64, adjustedImageBase64)
+    ]);
+
+    logger.info('Pipeline stages completed', {
+      globalResult,
+      portraitResult,
+      landscapeResult,
+      duration: Date.now() - startTime
+    });
+
+    // 세 단계 결과 합성
+    const merged = this.mergePipelineResults(globalResult, portraitResult, landscapeResult);
+
+    // 검증 및 범위 제한 적용
+    const validated = this.validateParametersWithLimits(merged, dynamicLimits);
+
+    logger.info('Pipeline analysis completed', {
+      duration: Date.now() - startTime,
+      result: validated
+    });
+
+    return validated;
+  }
+
+  /**
+   * Stage 1: 전역 색상 및 톤 분석
+   * brightness, contrast, saturation, vibrance, hue, temperature, tint, exposure,
+   * sharpness, clarity, dehaze, grain, highlights, shadows, whites, blacks,
+   * vignette, denoise, colorGrading, filters
+   */
+  private async analyzeGlobalTone(
+    originalImageBase64: string,
+    adjustedImageBase64: string
+  ): Promise<Partial<AdjustmentParameters>> {
+    // gpt-4o (OpenAI): 복잡한 JSON 구조화, response_format으로 안정적 출력
+    const systemPrompt = `You are a professional photo retouching analyst. Your job is to PRECISELY MEASURE the editing differences between two photos.
+
+STEP 1 - COMPARE: Look at the ORIGINAL and EDITED image side by side.
+STEP 2 - MEASURE: For each parameter, estimate the EXACT numeric difference. Do NOT round to safe values.
+STEP 3 - CHECK OVEREXPOSURE: If edited image has blown-out whites/sky → use highlights/whites NEGATIVE values to recover.
+STEP 4 - REPORT: Output only parameters that actually changed.
+
+CRITICAL RULES:
+- If the edited image is CLEARLY brighter → brightness 1.2-1.4 (AVOID exceeding 1.4 - causes overexposure)
+- If colors are VIVID/PUNCHY → saturation 1.4-1.8 (not 1.1)
+- If contrast is STRONG → contrast 1.3-1.5 (AVOID exceeding 1.5 - too harsh)
+- If sky/water is DEEP BLUE → DO NOT rely on global saturation alone, that's handled by selective color
+- BALANCE brightness with shadows/highlights - if brighter overall, lift shadows (+) and recover highlights (-)
+- NEVER report 1.0 for a parameter that visibly changed
+- NEVER underestimate. Match what you actually see.
+
+OVEREXPOSURE PREVENTION:
+- If edited sky/bright areas look washed out or blown → highlights should be NEGATIVE (-20 to -60)
+- If edited has stronger deep blacks → blacks should be NEGATIVE (-20 to -50)
+- If edited overall brighter → prefer lifting shadows (+20 to +50) over increasing brightness
+
+PARAMETERS (only report changed ones):
+- brightness: float (0.5-2.0). Safe range 1.1-1.4. Default=1.0
+- contrast: float (0.5-2.0). Safe range 1.1-1.5. Default=1.0
+- saturation: float (0.0-2.0). Default=1.0
+- vibrance: float (0.5-2.0). Default=1.0
+- hue: integer (-180 to 180). Default=0
+- temperature: integer (-100 to 100, positive=warmer/yellow, negative=cooler/blue). Default=0
+- tint: integer (-100 to 100). Default=0
+- exposure: float (-2.0 to 2.0). Prefer shadows/highlights over exposure. Default=0
+- highlights: integer (-100 to 100). Recover bright areas with NEGATIVE values. Default=0
+- shadows: integer (-100 to 100). Lifted shadows=+20 to +60. Default=0
+- whites: integer (-100 to 100). Default=0
+- blacks: integer (-100 to 100). Crushed blacks=-20 to -60. Default=0
+- sharpness: float (0.0-3.0). Visible sharpening=1.3-2.5. Default=1.0
+- clarity: float (0.0-2.0). Visible clarity=1.2-1.8. Default=1.0
+- dehaze: float (0.0-2.0). Default=0
+- grain: float (0.0-1.0). Default=0
+- vignette: float (-1.0 to 1.0). Default=0
+- denoise: float (0.0-1.0). Default=0
+- colorGrading: "warm_vintage"|"cool_modern"|"cinematic"|"none"
+- filters: string[]
+
+Return valid JSON object with ONLY the parameters that changed from their defaults.`;
+
+    const userText = `STEP 1: Compare these two images carefully - look at overall brightness, color richness, contrast, sharpness.
+STEP 2: Identify every visible difference in global tone and color (ignore portrait skin/face details and sky/water selective color changes).
+STEP 3: Report exact numeric values for each changed parameter. Be bold - if it looks strongly edited, report a strong value.
+
+Return JSON with only changed global tone/color parameters.`;
+
+    const rawJson = await this.callOpenAI(
+      MODELS.globalTone,
+      systemPrompt,
+      originalImageBase64,
+      adjustedImageBase64,
+      userText,
+      800
+    );
+
+    return JSON.parse(rawJson) as Partial<AdjustmentParameters>;
+  }
+
+  /**
+   * Stage 2: 인물/피부 보정 분석
+   * skinSmoothing, blemishRemoval, eyeBrightening, teethWhitening, faceSlimming,
+   * bodyRetouching, makeupEnhancement
+   */
+  private async analyzePortraitRetouching(
+    originalImageBase64: string,
+    adjustedImageBase64: string
+  ): Promise<Partial<AdjustmentParameters>> {
+    // claude-opus-4-6 (Anthropic): 피부톤·질감·눈/치아 미세 시각 변화 감지 최적
+    const systemPrompt = `You are a professional portrait retouching analyst with expertise in skin, facial features, and body editing detection.
+
+STEP 1 - CHECK: Is there a person/face in these images? If NO face visible → return {"noPortrait": true} immediately.
+STEP 2 - COMPARE: Examine face, skin texture, eyes, teeth, and body shape between ORIGINAL and EDITED.
+STEP 3 - MEASURE: Quantify each retouching change precisely.
+
+PARAMETERS (only report changed ones):
+- skinSmoothing: float (0.0-1.0)
+  * Zoom into skin area and compare pore/texture visibility
+  * 0.0=identical texture, 0.3=slightly smoother, 0.6=clearly smoothed, 0.8+=heavy airbrush effect
+- blemishRemoval: boolean
+  * true if any spots, acne, or skin blemishes were removed
+- eyeBrightening: float (0.0-1.0)
+  * Compare eye whites brightness and iris clarity
+  * 0.3=subtle, 0.6=noticeable, 0.9=dramatic
+- teethWhitening: float (0.0-1.0)
+  * Only report if teeth are visible. Compare whiteness level.
+- faceSlimming: float (0.0-0.5)
+  * Compare facial width/jaw shape. Report only if clearly reshaped.
+- bodyRetouching: boolean
+  * true if body proportions or shape were altered
+- makeupEnhancement: boolean
+  * true if lip color, eye makeup, blush etc. were added or enhanced
+
+If no face is visible in the image, return {"noPortrait": true}.
+Return valid JSON with only changed parameters.`;
+
+    const userText = `STEP 1: Is there a face/person visible? If not → {"noPortrait": true}
+STEP 2: Compare skin texture, eye clarity, teeth, and body shape between the two images.
+STEP 3: Report exact values for any portrait retouching changes you detect.
+
+Return JSON with only the portrait parameters that changed. If no person, return {"noPortrait": true}.`;
+
+    const rawJson = await this.callClaude(
+      MODELS.portraitRetouch,
+      systemPrompt,
+      originalImageBase64,
+      adjustedImageBase64,
+      userText,
+      400
+    );
+
+    const result = JSON.parse(rawJson) as any;
+    if (result.noPortrait) return {};
+    return result as Partial<AdjustmentParameters>;
+  }
+
+  /**
+   * Stage 3: 배경/풍경 보정 분석
+   * selectiveColorIntensity, landscapeClarity, 풍경 관련 파라미터
+   */
+  private async analyzeLandscapeRetouching(
+    originalImageBase64: string,
+    adjustedImageBase64: string
+  ): Promise<Partial<AdjustmentParameters>> {
+    // claude-opus-4-6 (Anthropic): 자연/풍경 색상 감지 최고 성능
+    const systemPrompt = `You are a professional landscape photo retouching analyst specializing in natural scene color enhancement detection.
+
+STEP 1 - IDENTIFY: What natural elements are present? (sky, water/ocean/river, mountains, trees/forest, rocks, fields)
+         If NO natural landscape elements → return {"noLandscape": true} immediately.
+
+STEP 2 - COMPARE SKY INTENSITY:
+  * Look at the sky in BOTH images. Is the edited sky NOTICEABLY BLUER or more vibrant?
+  * CRITICAL: Compare sky color change vs person/clothing/rocks color change
+  * If sky is MUCH BLUER but person's clothes stayed the same color → that's SELECTIVE color (high value needed)
+  * How intense is the sky enhancement?
+    - Pale/washed sky → deep vivid blue = 1.2-1.8 (COMMON for landscape edits)
+    - Subtle blue boost = 0.5-0.9
+    - Dramatic deep cobalt blue sky = 1.8-2.0
+  * IMPORTANT: Do NOT underestimate. If the sky looks CLEARLY bluer, report 1.0+
+
+STEP 3 - COMPARE WATER/OCEAN:
+  * Is water significantly more vivid, deeper blue/teal/turquoise in edited?
+  * If both sky AND water are much bluer → strong selective color (1.2-1.8)
+  * Is there more reflection detail or surface texture?
+
+STEP 4 - TEST SELECTIVITY:
+  * Compare non-landscape elements: person's clothing, skin tone, rocks
+  * If sky/water MUCH BLUER but other elements UNCHANGED → selectiveColorIntensity = 1.2-1.8
+  * If ALL colors in entire image boosted equally → selectiveColorIntensity = 0 (that's global saturation)
+
+STEP 5 - COMPARE SHARPNESS:
+  * Are distant mountains, treelines, or terrain edges NOTICEABLY crisper in the edited image?
+  * Compare foreground rocks/ground texture too.
+  * Clear sharpness increase = 1.0-1.5
+
+PARAMETERS:
+- selectiveColorIntensity: float (0.0-2.0)
+  * DEFAULT ASSUMPTION: Most landscape edits have strong selective color (1.0-1.8 range)
+  * Sky clearly bluer than original but clothes/skin same = 1.0-1.5
+  * Sky DRAMATICALLY deeper blue = 1.5-2.0
+  * Subtle sky tint = 0.5-0.9
+  * ALL colors boosted equally (global saturation) = 0
+  * No visible sky/water color change = 0
+  * DO NOT report values below 1.0 unless the sky enhancement is truly subtle
+
+- landscapeClarity: float (0.0-2.0)
+  * Distant elements clearly crisper = 1.0-1.5
+  * Dramatic sharpness increase = 1.5-2.0
+  * Subtle sharpening = 0.5-0.9
+  * No sharpness change = 0
+
+Return valid JSON with only the parameters that changed (omit if 0).`;
+
+    const userText = `STEP 1: Identify natural elements (sky, water, mountains, trees, rocks).
+STEP 2: Compare sky color intensity - is it bluer? How much? Is it SELECTIVE (only sky/water changed) or global?
+STEP 3: Compare water/ocean - deeper, more vivid blue?
+STEP 4: Compare landscape sharpness - are distant elements crisper?
+STEP 5: Report selectiveColorIntensity and landscapeClarity based on your observations.
+
+If no natural landscape elements present, return {"noLandscape": true}.
+Return JSON with landscape parameters only.`;
+
+    const rawJson = await this.callClaude(
+      MODELS.landscapeRetouch,
+      systemPrompt,
+      originalImageBase64,
+      adjustedImageBase64,
+      userText,
+      600
+    );
+
+    const result = JSON.parse(rawJson) as any;
+    if (result.noLandscape) return {};
+    return result as Partial<AdjustmentParameters>;
+  }
+
+  /**
+   * 3단계 파이프라인 결과를 합성
+   * Global 결과를 기반으로 Portrait/Landscape 결과를 오버레이
+   */
+  private mergePipelineResults(
+    global: Partial<AdjustmentParameters>,
+    portrait: Partial<AdjustmentParameters>,
+    landscape: Partial<AdjustmentParameters>
+  ): AdjustmentParameters {
+    // Global이 기본값이 되고, portrait/landscape 특화 파라미터로 오버라이드
+    const merged: AdjustmentParameters = {
+      // Global 기반 (필수 필드)
+      brightness: (global.brightness as number) ?? 1.0,
+      contrast: (global.contrast as number) ?? 1.0,
+      saturation: (global.saturation as number) ?? 1.0,
+      hue: (global.hue as number) ?? 0,
+      temperature: (global.temperature as number) ?? 0,
+      tint: (global.tint as number) ?? 0,
+      sharpness: (global.sharpness as number) ?? 1.0,
+      filters: Array.isArray(global.filters) ? global.filters : [],
+
+      // Optional global 파라미터
+      vibrance: global.vibrance,
+      exposure: global.exposure,
+      clarity: global.clarity,
+      dehaze: global.dehaze,
+      grain: global.grain,
+      highlights: global.highlights,
+      shadows: global.shadows,
+      whites: global.whites,
+      blacks: global.blacks,
+      vignette: global.vignette,
+      denoise: global.denoise,
+      colorGrading: global.colorGrading,
+
+      // Portrait 특화 파라미터 (Stage 2에서만 담당)
+      skinSmoothing: portrait.skinSmoothing,
+      blemishRemoval: portrait.blemishRemoval,
+      eyeBrightening: portrait.eyeBrightening,
+      teethWhitening: portrait.teethWhitening,
+      faceSlimming: portrait.faceSlimming,
+      bodyRetouching: portrait.bodyRetouching,
+      makeupEnhancement: portrait.makeupEnhancement,
+
+      // Landscape 특화 파라미터 (Stage 3에서만 담당)
+      selectiveColorIntensity: landscape.selectiveColorIntensity,
+      landscapeClarity: landscape.landscapeClarity,
+
+      // Deprecated 필드 (항상 0)
+      skyEnhancement: 0,
+      foliageEnhancement: 0,
+      waterEnhancement: 0,
+      naturalSaturation: 0,
+      dynamicRange: 0,
+      atmosphericPerspective: 0
+    };
+
+    logger.info('Pipeline results merged', {
+      globalKeys: Object.keys(global).filter(k => (global as any)[k] !== undefined),
+      portraitKeys: Object.keys(portrait).filter(k => (portrait as any)[k] !== undefined),
+      landscapeKeys: Object.keys(landscape).filter(k => (landscape as any)[k] !== undefined)
+    });
+
+    return merged;
+  }
+
+  /**
+   * OpenAI 모델 호출 헬퍼
+   * - 이미지 두 장을 base64로 전송
+   * - response_format: json_object으로 안정적 JSON 반환
+   */
+  private async callOpenAI(
+    model: string,
+    systemPrompt: string,
+    originalImageBase64: string,
+    adjustedImageBase64: string,
+    userText: string,
+    maxTokens: number
+  ): Promise<string> {
+    const response = await openai.chat.completions.create({
+      model,
+      max_tokens: maxTokens,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'ORIGINAL IMAGE:' },
+            { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${originalImageBase64}`, detail: 'high' } },
+            { type: 'text', text: 'EDITED IMAGE:' },
+            { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${adjustedImageBase64}`, detail: 'high' } },
+            { type: 'text', text: userText }
+          ]
+        }
+      ]
+    });
+
+    return response.choices[0].message.content || '{}';
+  }
+
+  /**
+   * Claude 모델 호출 헬퍼
+   * - 이미지 두 장을 base64로 전송
+   * - JSON 블록 추출 후 반환
+   */
+  private async callClaude(
+    model: string,
+    systemPrompt: string,
+    originalImageBase64: string,
+    adjustedImageBase64: string,
+    userText: string,
+    maxTokens: number
+  ): Promise<string> {
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'ORIGINAL IMAGE:' },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/jpeg',
+                data: originalImageBase64
+              }
+            },
+            { type: 'text', text: 'EDITED IMAGE:' },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/jpeg',
+                data: adjustedImageBase64
+              }
+            },
+            { type: 'text', text: userText }
+          ]
+        }
+      ]
+    });
+
+    const textBlock = response.content.find(b => b.type === 'text');
+    const text = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+
+    // JSON 블록 추출 (```json ... ``` 또는 { ... } 패턴)
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenced) return fenced[1].trim();
+
+    const brace = text.match(/\{[\s\S]*\}/);
+    if (brace) return brace[0];
+
+    throw new Error(`No JSON found in Claude response (model=${model}): ${text.slice(0, 200)}`);
   }
 
   /**

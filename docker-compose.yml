@@ -44,15 +44,13 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: tonecopy-backend
+    env_file:
+      - ./backend/.env
     environment:
       NODE_ENV: production
       PORT: 3012
       DATABASE_URL: postgresql://tonecopy:dev_password_change_in_prod@postgres:5432/tonecopy
       REDIS_URL: redis://redis:6379
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-dfnnldp3n}
-      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-519259346214933}
-      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-PHqzODk-HcS0QEELLRWHSSokAog}
       ALLOWED_ORIGINS: http://localhost:3002,http://localhost:5173,http://tonecopy-frontend
       RATE_LIMIT_WINDOW_MS: 3600000
       RATE_LIMIT_MAX_REQUESTS: 50

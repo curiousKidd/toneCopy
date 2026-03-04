@@ -1,5 +1,8 @@
 import { Request } from 'express';
 
+/** AI 분석 모드 */
+export type AnalysisMode = 'pipeline' | 'single';
+
 export interface AdjustmentParameters {
   // 기본 색상 조정
   brightness: number;

@@ -99,12 +99,19 @@ export class TrainingController {
         })
       );
 
+      // 파이프라인 모드 여부 결정 (기본값: true - 단계별 분석)
+      const usePipeline = req.body.use_pipeline !== 'false';
+
       // AI 분석 - 모든 이미지 쌍을 분석하여 평균 파라미터 계산
       const allParameters = await Promise.all(
         processedPairs.map(pair =>
-          aiService.analyzeImageAdjustments(pair.originalBase64, pair.adjustedBase64)
+          usePipeline
+            ? aiService.analyzeImageAdjustmentsPipelined(pair.originalBase64, pair.adjustedBase64)
+            : aiService.analyzeImageAdjustments(pair.originalBase64, pair.adjustedBase64)
         )
       );
+
+      logger.info('AI analysis mode', { usePipeline, pairCount: processedPairs.length });
 
       // 여러 분석 결과를 집계하여 최종 파라미터 도출
       const parameters = aiService.aggregateParameters(allParameters);
@@ -152,7 +159,8 @@ export class TrainingController {
           confidence_score: confidenceScore,
           analysis_time_ms: processingTime,
           preview_url: processedPairs[0].adjustedUrl,
-          image_pairs_count: processedPairs.length
+          image_pairs_count: processedPairs.length,
+          analysis_mode: usePipeline ? 'pipeline' : 'single'
         },
         timestamp: new Date().toISOString()
       });
