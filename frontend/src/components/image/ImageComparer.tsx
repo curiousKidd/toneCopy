@@ -4,12 +4,14 @@ interface ImageComparerProps {
   originalUrl: string;
   correctedUrl: string;
   className?: string;
+  style?: React.CSSProperties;
 }
 
 export const ImageComparer: React.FC<ImageComparerProps> = ({
   originalUrl,
   correctedUrl,
-  className = ''
+  className = '',
+  style
 }) => {
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
@@ -48,6 +50,7 @@ export const ImageComparer: React.FC<ImageComparerProps> = ({
     <div
       ref={containerRef}
       className={`relative overflow-hidden select-none ${className}`}
+      style={style}
       onMouseMove={handleMouseMove}
       onTouchMove={handleTouchMove}
       onMouseUp={handleMouseUp}

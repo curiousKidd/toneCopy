@@ -60,6 +60,7 @@ export class SelectiveColorService {
           channels: 4 // RGBA
         }
       })
+        .withMetadata()
         .jpeg({ quality: 95, chromaSubsampling: '4:4:4' })
         .toBuffer();
 

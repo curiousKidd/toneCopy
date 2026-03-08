@@ -23,16 +23,16 @@ const anthropic = new Anthropic({
  *     피부톤·질감·눈·치아 미세 시각 변화 감지에 Claude가 우수
  *     세밀한 인물 분석은 Claude Opus의 핵심 강점
  *
- * - Stage 3 (배경/풍경):       gpt-4o (OpenAI)
- *     선택적 색상(하늘/물) 2개 파라미터, GPT-4o로 충분
- *     비용 효율적이며 JSON 출력 안정성 높음
+ * - Stage 3 (배경/풍경):       claude-opus-4-6 (Anthropic)
+ *     하늘·물 선택적 색상 변화 감지에 Claude Opus 최적
+ *     selectiveColorIntensity 과소 추정 방지
  *
  * - 단일 모드 fallback:        gpt-4o (OpenAI)
  */
 const MODELS = {
   globalTone:       'gpt-4o',          // OpenAI: 복잡한 JSON 구조화, response_format 안정성
   portraitRetouch:  'claude-opus-4-6', // Claude Opus: 피부톤·눈·치아 미세 시각 분석
-  landscapeRetouch: 'claude-opus-4-6', // Claude Opus: 자연/풍경 색상 감지 최고 성능
+  landscapeRetouch: 'claude-opus-4-6', // Claude Opus: 자연/풍경 선택적 색상 감지
   fallback:         'gpt-4o'
 } as const;
 
@@ -332,84 +332,6 @@ First image = ORIGINAL, second image = EDITED.`
       // 선택적 색상 강화 - 동적 범위 적용
       selectiveColorIntensity: params.selectiveColorIntensity !== undefined ?
         this.clamp(params.selectiveColorIntensity, limits.selectiveColorIntensity.min, limits.selectiveColorIntensity.max) : undefined,
-
-      // 효과 & 필터
-      vignette: params.vignette !== undefined ? this.clamp(params.vignette, -1.0, 1.0) : undefined,
-      denoise: params.denoise !== undefined ? this.clamp(params.denoise, 0.0, 1.0) : undefined,
-      colorGrading: typeof params.colorGrading === 'string' ? params.colorGrading : undefined,
-      filters: Array.isArray(params.filters)
-        ? params.filters.filter((f: any) => typeof f === 'string')
-        : []
-    };
-  }
-
-  /**
-   * 파라미터 검증 및 정규화 (레거시 - 기본 상한선 사용)
-   * @deprecated Use validateParametersWithLimits instead
-   */
-  private validateParameters(params: any): AdjustmentParameters {
-    // 기본 상한선으로 폴백
-    const defaultLimits: DynamicLimits = {
-      brightness: { min: 0.7, max: 1.35 },
-      contrast: { min: 0.7, max: 1.25 },
-      saturation: { min: 0.6, max: 1.35 },
-      sharpness: { min: 0.5, max: 1.5 },
-      dehaze: { min: 0.0, max: 1.0 },
-      clarity: { min: 0.0, max: 1.3 },
-      selectiveColorIntensity: { min: 0.0, max: 1.2 }
-    };
-    return this.validateParametersWithLimits(params, defaultLimits);
-  }
-
-  /**
-   * 파라미터 검증 및 정규화 (구버전 - 삭제 예정)
-   * @deprecated
-   */
-  private validateParametersOld(params: any): AdjustmentParameters {
-    // 자연스러운 보정을 위한 더 엄격한 상한선
-    return {
-      // 기본 색상 조정 - 균형잡힌 범위 (보정 효과 유지하면서 과도함 방지)
-      brightness: this.clamp(params.brightness || 1.0, 0.7, 1.35),
-      contrast: this.clamp(params.contrast || 1.0, 0.7, 1.25),
-      saturation: this.clamp(params.saturation || 1.0, 0.6, 1.35),
-      vibrance: params.vibrance !== undefined ? this.clamp(params.vibrance, 0.5, 1.3) : undefined,
-      hue: Math.round(this.clamp(params.hue || 0, -50, 50)),
-      temperature: Math.round(this.clamp(params.temperature || 0, -50, 50)),
-      tint: Math.round(this.clamp(params.tint || 0, -50, 50)),
-      exposure: params.exposure !== undefined ? this.clamp(params.exposure, -1.0, 1.0) : undefined,
-
-      // 디테일 & 선명도 - 과도한 처리 방지
-      sharpness: this.clamp(params.sharpness || 1.0, 0.5, 1.5),
-      clarity: params.clarity !== undefined ? this.clamp(params.clarity, 0.0, 1.3) : undefined,
-      dehaze: params.dehaze !== undefined ? this.clamp(params.dehaze, 0.0, 1.0) : undefined,
-      grain: params.grain !== undefined ? this.clamp(params.grain, 0.0, 0.5) : undefined,
-
-      // 톤 커브
-      highlights: params.highlights !== undefined ? Math.round(this.clamp(params.highlights, -100, 100)) : undefined,
-      shadows: params.shadows !== undefined ? Math.round(this.clamp(params.shadows, -100, 100)) : undefined,
-      whites: params.whites !== undefined ? Math.round(this.clamp(params.whites, -100, 100)) : undefined,
-      blacks: params.blacks !== undefined ? Math.round(this.clamp(params.blacks, -100, 100)) : undefined,
-
-      // 인물/피부 보정
-      skinSmoothing: params.skinSmoothing !== undefined ? this.clamp(params.skinSmoothing, 0.0, 1.0) : undefined,
-      blemishRemoval: typeof params.blemishRemoval === 'boolean' ? params.blemishRemoval : undefined,
-      eyeBrightening: params.eyeBrightening !== undefined ? this.clamp(params.eyeBrightening, 0.0, 1.0) : undefined,
-      teethWhitening: params.teethWhitening !== undefined ? this.clamp(params.teethWhitening, 0.0, 1.0) : undefined,
-      faceSlimming: params.faceSlimming !== undefined ? this.clamp(params.faceSlimming, 0.0, 0.5) : undefined,
-      bodyRetouching: typeof params.bodyRetouching === 'boolean' ? params.bodyRetouching : undefined,
-      makeupEnhancement: typeof params.makeupEnhancement === 'boolean' ? params.makeupEnhancement : undefined,
-
-      // 풍경/자연 보정
-      skyEnhancement: params.skyEnhancement !== undefined ? this.clamp(params.skyEnhancement, 0.0, 1.0) : undefined,
-      foliageEnhancement: params.foliageEnhancement !== undefined ? this.clamp(params.foliageEnhancement, 0.0, 1.0) : undefined,
-      waterEnhancement: params.waterEnhancement !== undefined ? this.clamp(params.waterEnhancement, 0.0, 1.0) : undefined,
-      landscapeClarity: params.landscapeClarity !== undefined ? this.clamp(params.landscapeClarity, 0.0, 2.0) : undefined,
-      naturalSaturation: params.naturalSaturation !== undefined ? this.clamp(params.naturalSaturation, 0.0, 1.0) : undefined,
-      dynamicRange: params.dynamicRange !== undefined ? this.clamp(params.dynamicRange, 0.0, 1.0) : undefined,
-      atmosphericPerspective: params.atmosphericPerspective !== undefined ? this.clamp(params.atmosphericPerspective, 0.0, 1.0) : undefined,
-
-      // 선택적 색상 강화 (ImageMagick) - 자연스러운 범위로 제한
-      selectiveColorIntensity: params.selectiveColorIntensity !== undefined ? this.clamp(params.selectiveColorIntensity, 0.0, 1.2) : undefined,
 
       // 효과 & 필터
       vignette: params.vignette !== undefined ? this.clamp(params.vignette, -1.0, 1.0) : undefined,
@@ -1007,6 +929,9 @@ First image = ORIGINAL, second image = EDITED.`
       dynamicRange: avgNumber(p => p.dynamicRange),
       atmosphericPerspective: avgNumber(p => p.atmosphericPerspective),
 
+      // 선택적 색상 강화 (풍경 핵심 파라미터)
+      selectiveColorIntensity: avgNumber(p => p.selectiveColorIntensity),
+
       // 효과 & 필터
       vignette: avgNumber(p => p.vignette),
       denoise: avgNumber(p => p.denoise),
@@ -1355,6 +1280,7 @@ Return JSON with landscape parameters only.`;
     const response = await openai.chat.completions.create({
       model,
       max_tokens: maxTokens,
+      temperature: 0.1, // 일관성 확보: 동일 이미지 → 항상 같은 파라미터
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
@@ -1390,6 +1316,7 @@ Return JSON with landscape parameters only.`;
     const response = await anthropic.messages.create({
       model,
       max_tokens: maxTokens,
+      temperature: 0.1, // 일관성 확보: 동일 이미지 → 항상 같은 파라미터
       system: systemPrompt,
       messages: [
         {

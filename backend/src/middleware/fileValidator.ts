@@ -1,8 +1,8 @@
 import multer from 'multer';
 import { Request, Response, NextFunction } from 'express';
 
-const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png'];
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
 export const upload = multer({
   storage: multer.memoryStorage(),
@@ -12,7 +12,7 @@ export const upload = multer({
   },
   fileFilter: (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
     if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-      return cb(new Error('Invalid file type. Only JPG and PNG allowed.'));
+      return cb(new Error('Invalid file type. Only JPG, PNG, and WebP allowed.'));
     }
     cb(null, true);
   }

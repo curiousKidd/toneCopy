@@ -8,26 +8,28 @@ export class ImageService {
    */
   async optimizeImage(
     buffer: Buffer,
-    maxWidth = 2560,
-    maxHeight = 2560,
+    maxWidth = 4096,
+    maxHeight = 4096,
     quality = 95
   ): Promise<Buffer> {
     try {
       const metadata = await sharp(buffer).metadata();
+      const needsResize = (metadata.width || 0) > maxWidth || (metadata.height || 0) > maxHeight;
 
-      // 원본이 이미 작으면 리사이즈하지 않음
-      if ((metadata.width || 0) <= maxWidth && (metadata.height || 0) <= maxHeight) {
-        return await sharp(buffer)
-          .jpeg({ quality, progressive: true, mozjpeg: true })
-          .toBuffer();
+      const pipeline = needsResize
+        ? sharp(buffer).resize(maxWidth, maxHeight, {
+            fit: 'inside',
+            withoutEnlargement: true,
+            kernel: sharp.kernel.lanczos3
+          })
+        : sharp(buffer);
+
+      // 포맷 보존: PNG는 PNG로, 그 외(JPEG, WebP 등)는 JPEG로
+      if (metadata.format === 'png') {
+        return await pipeline.png({ compressionLevel: 6, quality: 100 }).toBuffer();
       }
 
-      return await sharp(buffer)
-        .resize(maxWidth, maxHeight, {
-          fit: 'inside',
-          withoutEnlargement: true,
-          kernel: sharp.kernel.lanczos3
-        })
+      return await pipeline
         .jpeg({ quality, progressive: true, mozjpeg: true })
         .toBuffer();
     } catch (error: any) {

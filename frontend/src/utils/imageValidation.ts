@@ -3,14 +3,14 @@ export interface ValidationResult {
   error?: string;
 }
 
-const ALLOWED_TYPES = ['image/jpeg', 'image/png'];
-const MAX_SIZE_MB = 10;
+const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const MAX_SIZE_MB = 50;
 
 export const validateImage = (file: File, maxSizeMB = MAX_SIZE_MB): ValidationResult => {
   if (!ALLOWED_TYPES.includes(file.type)) {
     return {
       valid: false,
-      error: 'Invalid file type. Only JPG and PNG files are allowed.',
+      error: 'Invalid file type. Only JPG, PNG, and WebP files are allowed.',
     };
   }
 

@@ -6,6 +6,7 @@ import { cacheService } from '../services/cacheService';
 import { prisma } from '../models';
 import { logger } from '../utils/logger';
 import type { AdjustmentParameters } from '../types';
+import { extractUserId } from '../types';
 
 export class CorrectionController {
   /**
@@ -40,7 +41,7 @@ export class CorrectionController {
         });
       }
 
-      const userId = req.ip || 'anonymous';
+      const userId = extractUserId(req);
 
       // Redis 캐시에서 프로필 파라미터 조회
       let parameters = await cacheService.get<AdjustmentParameters>(
@@ -73,13 +74,16 @@ export class CorrectionController {
         );
       }
 
-      // 고급 보정 적용 (적응형 알고리즘 사용)
-      const correctedImage = await advancedImageService.applyAdaptiveCorrection(
-        imageFile.buffer,
-        parameters
-      );
+      // 원본 이미지 업로드 (히스토리 저장용, 보정과 병렬로 처리)
+      const [correctedImage, originalUrl] = await Promise.all([
+        advancedImageService.applyAdaptiveCorrection(imageFile.buffer, parameters),
+        storageService.upload(imageFile.buffer, {
+          folder: 'tonecopy/corrections/originals',
+          expiresIn: 86400 // 24시간
+        })
+      ]);
 
-      // Cloudinary 업로드
+      // 보정된 이미지 Cloudinary 업로드
       const correctedUrl = await storageService.upload(correctedImage, {
         folder: 'tonecopy/corrections',
         expiresIn: 86400 // 24시간
@@ -87,17 +91,18 @@ export class CorrectionController {
 
       const processingTime = Date.now() - startTime;
 
-      // 히스토리 저장
-      await prisma.correctionHistory.create({
+      // 히스토리 저장 (실제 URL로 기록)
+      const history = await prisma.correctionHistory.create({
         data: {
           profileId,
-          originalImageUrl: 'temp', // 임시
+          originalImageUrl: originalUrl,
           correctedImageUrl: correctedUrl,
           processingTimeMs: processingTime
         }
       });
 
       logger.info('Correction applied', {
+        historyId: history.id,
         profileId,
         processingTime
       });
@@ -107,7 +112,8 @@ export class CorrectionController {
       return res.status(200).json({
         success: true,
         data: {
-          correction_id: Date.now().toString(),
+          correction_id: history.id,
+          original_image_url: originalUrl,
           corrected_image_url: correctedUrl,
           applied_adjustments: parameters,
           processing_time_ms: processingTime,
@@ -119,6 +125,136 @@ export class CorrectionController {
 
     } catch (error: any) {
       logger.error('Correction apply failed', {
+        error: error.message,
+        stack: error.stack
+      });
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/correction/batch
+   * 여러 이미지를 한 번에 보정 (배치 처리)
+   */
+  async applyBatch(req: Request, res: Response, next: NextFunction) {
+    const startTime = Date.now();
+
+    try {
+      const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+      if (!files?.images || files.images.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'MISSING_FILES',
+            message: 'At least one image file is required'
+          }
+        });
+      }
+
+      const profileId = req.body.profile_id;
+      if (!profileId) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'MISSING_PROFILE_ID',
+            message: 'Profile ID is required'
+          }
+        });
+      }
+
+      if (files.images.length > 20) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'TOO_MANY_FILES',
+            message: 'Maximum 20 images per batch'
+          }
+        });
+      }
+
+      const userId = extractUserId(req);
+
+      // 프로필 파라미터 조회 (캐시 → DB)
+      let parameters = await cacheService.get<AdjustmentParameters>(
+        `profile:${userId}:${profileId}`
+      );
+
+      if (!parameters) {
+        const profile = await prisma.correctionProfile.findUnique({
+          where: { id: profileId }
+        });
+
+        if (!profile) {
+          return res.status(404).json({
+            success: false,
+            error: {
+              code: 'PROFILE_NOT_FOUND',
+              message: 'Correction profile not found'
+            }
+          });
+        }
+
+        parameters = profile.parameters as unknown as AdjustmentParameters;
+        await cacheService.set(`profile:${userId}:${profileId}`, parameters, 3600);
+      }
+
+      // 모든 이미지 병렬 보정
+      const results = await Promise.all(
+        files.images.map(async (imageFile, index) => {
+          const [correctedImage, originalUrl] = await Promise.all([
+            advancedImageService.applyAdaptiveCorrection(imageFile.buffer, parameters!),
+            storageService.upload(imageFile.buffer, {
+              folder: 'tonecopy/corrections/originals',
+              expiresIn: 86400
+            })
+          ]);
+
+          const correctedUrl = await storageService.upload(correctedImage, {
+            folder: 'tonecopy/corrections',
+            expiresIn: 86400
+          });
+
+          const history = await prisma.correctionHistory.create({
+            data: {
+              profileId,
+              originalImageUrl: originalUrl,
+              correctedImageUrl: correctedUrl,
+              processingTimeMs: Date.now() - startTime
+            }
+          });
+
+          return {
+            index,
+            correction_id: history.id,
+            original_image_url: originalUrl,
+            corrected_image_url: correctedUrl,
+            download_url: correctedUrl
+          };
+        })
+      );
+
+      const processingTime = Date.now() - startTime;
+      const expiresAt = new Date(Date.now() + 86400000).toISOString();
+
+      logger.info('Batch correction applied', {
+        profileId,
+        imageCount: files.images.length,
+        processingTime
+      });
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          results,
+          total: results.length,
+          processing_time_ms: processingTime,
+          expires_at: expiresAt
+        },
+        timestamp: new Date().toISOString()
+      });
+
+    } catch (error: any) {
+      logger.error('Batch correction failed', {
         error: error.message,
         stack: error.stack
       });

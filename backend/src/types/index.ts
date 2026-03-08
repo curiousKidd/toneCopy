@@ -52,12 +52,35 @@ export interface AdjustmentParameters {
   denoise?: number;
   colorGrading?: string;
   filters: string[];
+
+  /**
+   * 3D Color LUT 데이터 (17×17×17 × 3 = 14,739 개 float)
+   * 학습 이미지에서 직접 추출한 픽셀 매핑 → AI 파라미터보다 훨씬 정확
+   * 존재할 경우 AI 파라미터 대신 LUT로 색상 보정 적용
+   */
+  colorLUT?: number[];
 }
 
 export interface CustomRequest extends Request {
   session?: {
     userId?: string;
   };
+}
+
+/**
+ * 요청에서 사용자 ID 추출
+ * X-User-ID 헤더(프론트엔드 UUID)를 우선 사용, 없으면 IP 주소 fallback
+ */
+export function extractUserId(req: Request): string {
+  const headerUserId = req.headers['x-user-id'];
+  if (
+    headerUserId &&
+    typeof headerUserId === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(headerUserId)
+  ) {
+    return headerUserId;
+  }
+  return req.ip || 'anonymous';
 }
 
 export interface UploadOptions {

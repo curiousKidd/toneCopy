@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ImageUploader } from '../components/image/ImageUploader';
+import { ImageComparer } from '../components/image/ImageComparer';
 import { applyCorrection } from '../services/correctionApi';
 import { getProfiles } from '../services/profileApi';
 
@@ -122,13 +123,30 @@ export const CorrectionPage: React.FC = () => {
             {/* Result Display */}
             <div className="bg-white rounded-lg p-8 shadow-md mb-8">
               <h2 className="text-2xl font-bold mb-4">Result</h2>
-              <div className="mb-4 flex justify-center">
-                <img
-                  src={result.corrected_image_url}
-                  alt="Corrected"
-                  className="max-w-full max-h-[60vh] object-contain rounded-lg shadow-lg"
-                />
-              </div>
+
+              {/* Before/After Comparer */}
+              {result.original_image_url ? (
+                <div className="mb-6">
+                  <p className="text-sm text-gray-500 mb-2 text-center">
+                    Drag the slider to compare before and after
+                  </p>
+                  <ImageComparer
+                    originalUrl={result.original_image_url}
+                    correctedUrl={result.corrected_image_url}
+                    className="w-full rounded-lg shadow-lg"
+                    style={{ height: '60vh' }}
+                  />
+                </div>
+              ) : (
+                <div className="mb-4 flex justify-center">
+                  <img
+                    src={result.corrected_image_url}
+                    alt="Corrected"
+                    className="max-w-full max-h-[60vh] object-contain rounded-lg shadow-lg"
+                  />
+                </div>
+              )}
+
               <div className="flex gap-4 justify-center">
                 <button
                   onClick={handleDownload}

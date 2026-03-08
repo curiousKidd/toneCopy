@@ -31,6 +31,7 @@ export interface AnalysisResult {
 
 export interface CorrectionResult {
   correction_id: string;
+  original_image_url: string;
   corrected_image_url: string;
   applied_adjustments: AdjustmentParameters;
   processing_time_ms: number;
