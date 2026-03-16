@@ -15,7 +15,18 @@ export const ImageComparer: React.FC<ImageComparerProps> = ({
 }) => {
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
+  // 이미지 실제 비율을 동적으로 반영
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // 원본 이미지 로드 후 비율 계산
+  useEffect(() => {
+    const img = new Image();
+    img.onload = () => {
+      setAspectRatio(img.naturalHeight / img.naturalWidth);
+    };
+    img.src = originalUrl;
+  }, [originalUrl]);
 
   const handleMove = (clientX: number) => {
     if (!containerRef.current) return;
@@ -46,22 +57,40 @@ export const ImageComparer: React.FC<ImageComparerProps> = ({
     return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
   }, []);
 
+  // aspect-ratio + max-height 조합:
+  // - aspect-ratio로 비율 고정
+  // - max-height: 80vh로 화면 초과 방지
+  // - 브라우저가 두 제약 중 더 작은 쪽을 선택 → 비율 유지하며 화면 안에 맞춤
+  const wrapperStyle: React.CSSProperties = aspectRatio
+    ? {
+        aspectRatio: `1 / ${aspectRatio}`,  // width / height 비율
+        maxHeight: '80vh',
+        width: '100%',
+        maxWidth: `calc(80vh / ${aspectRatio})`, // 높이 제한 시 너비도 비율에 맞게 축소
+      }
+    : { maxHeight: '80vh', width: '100%' };
+
   return (
-    <div
-      ref={containerRef}
-      className={`relative overflow-hidden select-none ${className}`}
-      style={style}
-      onMouseMove={handleMouseMove}
-      onTouchMove={handleTouchMove}
-      onMouseUp={handleMouseUp}
-      onTouchEnd={handleMouseUp}
-    >
+    <div className={`flex justify-center ${className}`} style={style}>
+      <div
+        style={wrapperStyle}
+        className="relative overflow-hidden select-none"
+      >
+      {/* 내부 absolute 컨테이너 */}
+      <div
+        ref={containerRef}
+        className="absolute inset-0"
+        onMouseMove={handleMouseMove}
+        onTouchMove={handleTouchMove}
+        onMouseUp={handleMouseUp}
+        onTouchEnd={handleMouseUp}
+      >
       {/* Original Image (Right side) */}
       <div className="absolute inset-0">
         <img
           src={originalUrl}
           alt="Original"
-          className="w-full h-full object-cover"
+          className="w-full h-full object-contain"
           draggable={false}
         />
         <div className="absolute top-4 right-4 bg-black bg-opacity-50 text-white px-3 py-1 rounded-md text-sm">
@@ -77,7 +106,7 @@ export const ImageComparer: React.FC<ImageComparerProps> = ({
         <img
           src={correctedUrl}
           alt="Corrected"
-          className="w-full h-full object-cover"
+          className="w-full h-full object-contain"
           draggable={false}
         />
         <div className="absolute top-4 left-4 bg-blue-500 bg-opacity-90 text-white px-3 py-1 rounded-md text-sm">
@@ -107,6 +136,8 @@ export const ImageComparer: React.FC<ImageComparerProps> = ({
             />
           </svg>
         </div>
+      </div>
+      </div>
       </div>
     </div>
   );

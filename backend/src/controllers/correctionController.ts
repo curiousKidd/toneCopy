@@ -1,11 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import { imageService } from '../services/imageService';
 import { advancedImageService } from '../services/advancedImageService';
+import { adaptiveCorrectionService } from '../services/adaptiveCorrectionService';
+import { histogramMatchingService } from '../services/histogramMatchingService';
 import { storageService } from '../services/storageService';
 import { cacheService } from '../services/cacheService';
 import { prisma } from '../models';
 import { logger } from '../utils/logger';
-import type { AdjustmentParameters } from '../types';
+import type { AdjustmentParameters, StyleProfile, CorrectionMode } from '../types';
 import { extractUserId } from '../types';
 
 export class CorrectionController {
@@ -43,43 +45,104 @@ export class CorrectionController {
 
       const userId = extractUserId(req);
 
-      // Redis 캐시에서 프로필 파라미터 조회
-      let parameters = await cacheService.get<AdjustmentParameters>(
-        `profile:${userId}:${profileId}`
-      );
+      // ─── 프로필 로드 (캐시 → DB) ───
+      let cachedData = await cacheService.get<any>(`profile:${userId}:${profileId}`);
 
-      // 캐시 미스 시 데이터베이스 조회
-      if (!parameters) {
-        const profile = await prisma.correctionProfile.findUnique({
+      let parameters: AdjustmentParameters;
+      let styleProfile: StyleProfile | null = null;
+      let referenceThumbnails: string[] = [];
+
+      if (cachedData) {
+        // 신규 캐시 구조: { parameters, styleProfile, referenceThumbnails }
+        if (cachedData.parameters && cachedData.styleProfile) {
+          parameters        = cachedData.parameters;
+          styleProfile      = cachedData.styleProfile;
+          referenceThumbnails = cachedData.referenceThumbnails || [];
+        } else {
+          // 구 캐시 구조 (파라미터만 저장된 경우) 호환
+          parameters = cachedData as AdjustmentParameters;
+        }
+      } else {
+        // DB 조회
+        const dbProfile = await prisma.correctionProfile.findUnique({
           where: { id: profileId }
         });
 
-        if (!profile) {
+        if (!dbProfile) {
           return res.status(404).json({
             success: false,
-            error: {
-              code: 'PROFILE_NOT_FOUND',
-              message: 'Correction profile not found'
-            }
+            error: { code: 'PROFILE_NOT_FOUND', message: 'Correction profile not found' }
           });
         }
 
-        parameters = profile.parameters as unknown as AdjustmentParameters;
+        parameters          = dbProfile.parameters as unknown as AdjustmentParameters;
+        referenceThumbnails = dbProfile.referenceThumbnails || [];
 
-        // 캐시에 저장
+        // styleCharacteristics가 있으면 StyleProfile 복원
+        if (dbProfile.styleDescription && dbProfile.styleCharacteristics) {
+          styleProfile = {
+            description:     dbProfile.styleDescription,
+            characteristics: dbProfile.styleCharacteristics as any,
+            generatedAt:     dbProfile.updatedAt.toISOString()
+          };
+        }
+
+        // 캐시 갱신
         await cacheService.set(
           `profile:${userId}:${profileId}`,
-          parameters,
+          { parameters, styleProfile, referenceThumbnails },
           3600
         );
       }
 
-      // 원본 이미지 업로드 (히스토리 저장용, 보정과 병렬로 처리)
+      // ─── 보정 모드 결정 ───
+      // adaptive_ai: 신규 스타일 프로필이 있는 경우 (AI 적응형 보정)
+      // lut: 구 프로필 (LUT 방식 fallback)
+      const correctionMode: CorrectionMode = styleProfile ? 'adaptive_ai' : 'lut';
+
+      logger.info('보정 모드 결정', { correctionMode, profileId });
+
+      // 전송 프로필 복원 (adaptive_ai 모드에서만 사용)
+      let transferProfile = null;
+      let segmentedProfile = null;
+      if (correctionMode === 'adaptive_ai') {
+        const params = parameters as any;
+        // HSL 세그먼트 프로필 (우선)
+        if (params.segmentedTransfer) {
+          try {
+            segmentedProfile = histogramMatchingService.deserializeSegmentedProfile(params.segmentedTransfer);
+            logger.info('HSL 세그먼트 프로필 복원 완료');
+          } catch (err: any) {
+            logger.warn('세그먼트 프로필 복원 실패, 글로벌로 폴백', { error: err.message });
+          }
+        }
+        // 글로벌 히스토그램 (폴백)
+        if (!segmentedProfile && params.histogramTransfer) {
+          try {
+            transferProfile = histogramMatchingService.deserializeProfile(params.histogramTransfer);
+          } catch (err: any) {
+            logger.warn('히스토그램 프로필 복원 실패, 무시', { error: err.message });
+          }
+        }
+      }
+
+      // ─── 보정 실행 ───
+      const correctionPromise = correctionMode === 'adaptive_ai' && styleProfile
+        ? adaptiveCorrectionService.applyAdaptiveStyle(
+            imageFile.buffer,
+            styleProfile,
+            transferProfile,
+            referenceThumbnails,
+            segmentedProfile
+          )
+        : advancedImageService.applyAdaptiveCorrection(imageFile.buffer, parameters);
+
+      // 원본 업로드와 보정을 병렬 처리
       const [correctedImage, originalUrl] = await Promise.all([
-        advancedImageService.applyAdaptiveCorrection(imageFile.buffer, parameters),
+        correctionPromise,
         storageService.upload(imageFile.buffer, {
           folder: 'tonecopy/corrections/originals',
-          expiresIn: 86400 // 24시간
+          expiresIn: 86400
         })
       ]);
 
@@ -101,13 +164,14 @@ export class CorrectionController {
         }
       });
 
-      logger.info('Correction applied', {
+      logger.info('보정 완료', {
         historyId: history.id,
         profileId,
-        processingTime
+        processingTime,
+        correctionMode
       });
 
-      const expiresAt = new Date(Date.now() + 86400000); // 24시간 후
+      const expiresAt = new Date(Date.now() + 86400000);
 
       return res.status(200).json({
         success: true,
@@ -118,7 +182,8 @@ export class CorrectionController {
           applied_adjustments: parameters,
           processing_time_ms: processingTime,
           download_url: correctedUrl,
-          expires_at: expiresAt.toISOString()
+          expires_at: expiresAt.toISOString(),
+          correction_mode: correctionMode  // 어떤 방식으로 보정됐는지 클라이언트에 노출
         },
         timestamp: new Date().toISOString()
       });
@@ -174,35 +239,88 @@ export class CorrectionController {
 
       const userId = extractUserId(req);
 
-      // 프로필 파라미터 조회 (캐시 → DB)
-      let parameters = await cacheService.get<AdjustmentParameters>(
-        `profile:${userId}:${profileId}`
-      );
+      // 프로필 로드 (단일 보정과 동일 구조)
+      let cachedData = await cacheService.get<any>(`profile:${userId}:${profileId}`);
 
-      if (!parameters) {
-        const profile = await prisma.correctionProfile.findUnique({
+      let batchParameters: AdjustmentParameters;
+      let batchStyleProfile: StyleProfile | null = null;
+      let batchReferenceThumbnails: string[] = [];
+
+      if (cachedData) {
+        if (cachedData.parameters && cachedData.styleProfile) {
+          batchParameters         = cachedData.parameters;
+          batchStyleProfile       = cachedData.styleProfile;
+          batchReferenceThumbnails = cachedData.referenceThumbnails || [];
+        } else {
+          batchParameters = cachedData as AdjustmentParameters;
+        }
+      } else {
+        const dbProfile = await prisma.correctionProfile.findUnique({
           where: { id: profileId }
         });
 
-        if (!profile) {
+        if (!dbProfile) {
           return res.status(404).json({
             success: false,
-            error: {
-              code: 'PROFILE_NOT_FOUND',
-              message: 'Correction profile not found'
-            }
+            error: { code: 'PROFILE_NOT_FOUND', message: 'Correction profile not found' }
           });
         }
 
-        parameters = profile.parameters as unknown as AdjustmentParameters;
-        await cacheService.set(`profile:${userId}:${profileId}`, parameters, 3600);
+        batchParameters         = dbProfile.parameters as unknown as AdjustmentParameters;
+        batchReferenceThumbnails = dbProfile.referenceThumbnails || [];
+
+        if (dbProfile.styleDescription && dbProfile.styleCharacteristics) {
+          batchStyleProfile = {
+            description:     dbProfile.styleDescription,
+            characteristics: dbProfile.styleCharacteristics as any,
+            generatedAt:     dbProfile.updatedAt.toISOString()
+          };
+        }
+
+        await cacheService.set(
+          `profile:${userId}:${profileId}`,
+          { parameters: batchParameters, styleProfile: batchStyleProfile, referenceThumbnails: batchReferenceThumbnails },
+          3600
+        );
+      }
+
+      const batchCorrectionMode: CorrectionMode = batchStyleProfile ? 'adaptive_ai' : 'lut';
+
+      let batchTransferProfile = null;
+      let batchSegmentedProfile = null;
+      if (batchCorrectionMode === 'adaptive_ai') {
+        const batchParams = batchParameters as any;
+        if (batchParams.segmentedTransfer) {
+          try {
+            batchSegmentedProfile = histogramMatchingService.deserializeSegmentedProfile(batchParams.segmentedTransfer);
+          } catch {
+            // 복원 실패 시 무시
+          }
+        }
+        if (!batchSegmentedProfile && batchParams.histogramTransfer) {
+          try {
+            batchTransferProfile = histogramMatchingService.deserializeProfile(batchParams.histogramTransfer);
+          } catch {
+            // 복원 실패 시 무시
+          }
+        }
       }
 
       // 모든 이미지 병렬 보정
       const results = await Promise.all(
         files.images.map(async (imageFile, index) => {
+          const correctionPromise = batchCorrectionMode === 'adaptive_ai' && batchStyleProfile
+            ? adaptiveCorrectionService.applyAdaptiveStyle(
+                imageFile.buffer,
+                batchStyleProfile,
+                batchTransferProfile,
+                batchReferenceThumbnails,
+                batchSegmentedProfile
+              )
+            : advancedImageService.applyAdaptiveCorrection(imageFile.buffer, batchParameters);
+
           const [correctedImage, originalUrl] = await Promise.all([
-            advancedImageService.applyAdaptiveCorrection(imageFile.buffer, parameters!),
+            correctionPromise,
             storageService.upload(imageFile.buffer, {
               folder: 'tonecopy/corrections/originals',
               expiresIn: 86400

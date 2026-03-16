@@ -20,6 +20,25 @@ export interface AdjustmentParameters {
   filters: string[];
 }
 
+export interface StyleCharacteristics {
+  overallMood: string;
+  brightnessApproach: string;
+  contrastLevel: string;
+  saturationStyle: string;
+  shadowTreatment: string;
+  highlightTreatment: string;
+  skinToneApproach: string;
+  colorGradingStyle: string;
+  sharpnessPreference: string;
+  technicalNotes: string;
+  adaptationRules: string[];
+}
+
+export interface StyleProfileSummary {
+  description: string;
+  characteristics: StyleCharacteristics;
+}
+
 export interface AnalysisResult {
   profile_id: string;
   profile_name: string;
@@ -27,6 +46,8 @@ export interface AnalysisResult {
   confidence_score: number;
   analysis_time_ms: number;
   preview_url: string;
+  // 신규: 스타일 프로필
+  style_profile?: StyleProfileSummary;
 }
 
 export interface CorrectionResult {

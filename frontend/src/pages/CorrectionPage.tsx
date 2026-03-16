@@ -134,7 +134,6 @@ export const CorrectionPage: React.FC = () => {
                     originalUrl={result.original_image_url}
                     correctedUrl={result.corrected_image_url}
                     className="w-full rounded-lg shadow-lg"
-                    style={{ height: '60vh' }}
                   />
                 </div>
               ) : (

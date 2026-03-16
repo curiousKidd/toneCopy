@@ -9,6 +9,8 @@ import { logger } from '../utils/logger';
 import { extractUserId } from '../types';
 import type { AdjustmentParameters } from '../types';
 import { lutService } from '../services/lutService';
+import { styleProfileService } from '../services/styleProfileService';
+import { histogramMatchingService } from '../services/histogramMatchingService';
 
 export class TrainingController {
   /**
@@ -109,10 +111,9 @@ export class TrainingController {
       // 파이프라인 모드 여부 결정 (기본값: true - 단계별 분석)
       const usePipeline = req.body.use_pipeline !== 'false';
 
-      // AI 분석 + LUT 생성 병렬 실행
-      // LUT: 픽셀 직접 매핑 → AI 파라미터보다 훨씬 정확한 색상 재현
-      const [allParameters, allLUTs] = await Promise.all([
-        // AI 파라미터 분석 (UI 표시용 및 vignette/grain 등 공간 효과용)
+      // ─── 병렬 처리: 기존 AI 파라미터 분석 + LUT + 신규 스타일 프로필 ───
+      const [allParameters, allLUTs, styleProfile, transferProfile, segmentedProfile] = await Promise.all([
+        // 기존: AI 파라미터 분석 (spatial effects용)
         Promise.all(
           processedPairs.map(pair =>
             usePipeline
@@ -120,66 +121,97 @@ export class TrainingController {
               : aiService.analyzeImageAdjustments(pair.originalBase64, pair.adjustedBase64)
           )
         ),
-        // LUT 생성 (실제 보정 적용용)
+        // 기존: LUT 생성 (호환성 유지)
         Promise.all(
           processedPairs.map(pair =>
             lutService.buildFromPair(pair.originalOptimized, pair.adjustedOptimized)
           )
+        ),
+        // 신규: 스타일 프로필 생성 (여러 쌍 종합 분석)
+        styleProfileService.generateProfile(
+          processedPairs.map(p => p.originalBase64),
+          processedPairs.map(p => p.adjustedBase64)
+        ),
+        // 신규: 글로벌 히스토그램 전송 프로필 생성 (폴백용)
+        histogramMatchingService.buildTransferProfile(
+          processedPairs.map(p => p.originalOptimized),
+          processedPairs.map(p => p.adjustedOptimized)
+        ),
+        // 신규: HSL 세그먼트별 전송 프로필 생성 (핵심 개선)
+        histogramMatchingService.buildSegmentedTransferProfile(
+          processedPairs.map(p => p.originalOptimized),
+          processedPairs.map(p => p.adjustedOptimized)
         )
       ]);
 
-      logger.info('AI analysis mode', { usePipeline, pairCount: processedPairs.length });
-
-      // 여러 분석 결과를 집계하여 최종 파라미터 도출
-      const parameters = aiService.aggregateParameters(allParameters);
-      const confidenceScore = aiService.calculateConfidenceScore(parameters);
-
-      // LUT 합성: 여러 쌍의 평균 LUT → 색상 공간 커버리지 향상
-      const colorLUT = lutService.mergeLUTs(allLUTs);
-
-      // 최종 저장 데이터: AI 파라미터 + LUT 통합
-      // colorLUT이 있으면 보정 시 파라미터 대신 LUT 사용 (훨씬 정확)
-      const parametersWithLUT = {
-        ...parameters,
-        colorLUT
-      };
-
-      logger.info('LUT generation complete', {
-        lutSize: colorLUT.length,
-        pairCount: allLUTs.length
+      logger.info('AI 분석 완료', {
+        usePipeline,
+        pairCount: processedPairs.length,
+        styleMode: styleProfile.characteristics.overallMood,
+        segmentedProfilePairs: segmentedProfile.trainedPairs
       });
 
-      // 사용자 생성 또는 조회 (upsert)
+      // 기존 파라미터 집계
+      const parameters = aiService.aggregateParameters(allParameters);
+      const confidenceScore = aiService.calculateConfidenceScore(parameters);
+      const colorLUT = lutService.mergeLUTs(allLUTs);
+
+      // 참조 썸네일 생성 (few-shot용, 원본/보정본 쌍으로 저장)
+      // 최대 2쌍 = 4장의 썸네일 (토큰 절약)
+      const thumbnailPairLimit = Math.min(processedPairs.length, 2);
+      const referenceThumbnails: string[] = [];
+      for (let i = 0; i < thumbnailPairLimit; i++) {
+        const [origThumb, adjThumb] = await Promise.all([
+          styleProfileService.generateThumbnail(processedPairs[i].originalOptimized),
+          styleProfileService.generateThumbnail(processedPairs[i].adjustedOptimized)
+        ]);
+        referenceThumbnails.push(origThumb, adjThumb);
+      }
+
+      // 최종 저장 파라미터 (기존 + 히스토그램 전송 프로필 + HSL 세그먼트 프로필)
+      const parametersWithLUT = {
+        ...parameters,
+        colorLUT,
+        histogramTransfer:   histogramMatchingService.serializeProfile(transferProfile),
+        segmentedTransfer:   histogramMatchingService.serializeSegmentedProfile(segmentedProfile)
+      };
+
+      // 사용자 upsert
       await prisma.user.upsert({
         where: { id: userId },
         update: {},
         create: { id: userId }
       });
 
-      // 데이터베이스 저장 (AI 파라미터 + LUT 포함)
+      // DB 저장 (기존 필드 + 신규 스타일 프로필 필드)
       const profile = await prisma.correctionProfile.create({
         data: {
           userId,
           profileName,
-          parameters: parametersWithLUT as any,
-          originalImageUrls: processedPairs.map(p => p.originalUrl),
-          adjustedImageUrls: processedPairs.map(p => p.adjustedUrl)
+          parameters:           parametersWithLUT as any,
+          originalImageUrls:    processedPairs.map(p => p.originalUrl),
+          adjustedImageUrls:    processedPairs.map(p => p.adjustedUrl),
+          // 신규 스타일 프로필 필드
+          styleDescription:     styleProfile.description,
+          styleCharacteristics: styleProfile.characteristics as any,
+          referenceThumbnails
         }
       });
 
-      // Redis 캐싱
+      // Redis 캐싱 (스타일 프로필 포함)
       await cacheService.set(
         `profile:${userId}:${profile.id}`,
-        parameters,
+        { parameters: parametersWithLUT, styleProfile, referenceThumbnails },
         3600
       );
 
       const processingTime = Date.now() - startTime;
 
-      logger.info('Training analysis completed', {
+      logger.info('학습 분석 완료', {
         profileId: profile.id,
         userId,
-        processingTime
+        processingTime,
+        styleDescription: styleProfile.description.slice(0, 60)
       });
 
       return res.status(200).json({
@@ -189,6 +221,11 @@ export class TrainingController {
           profile_name: profileName,
           detected_adjustments: parameters,
           confidence_score: confidenceScore,
+          // 신규: 스타일 프로필 정보 반환
+          style_profile: {
+            description:     styleProfile.description,
+            characteristics: styleProfile.characteristics
+          },
           analysis_time_ms: processingTime,
           preview_url: processedPairs[0].adjustedUrl,
           image_pairs_count: processedPairs.length,

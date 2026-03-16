@@ -29,17 +29,22 @@ enum SubscriptionTier {
 }
 
 model CorrectionProfile {
-  id                 String              @id @default(uuid())
-  userId             String              @map("user_id")
-  profileName        String              @map("profile_name")
-  parameters         Json                @db.JsonB
-  originalImageUrls  String[]            @map("original_image_urls")
-  adjustedImageUrls  String[]            @map("adjusted_image_urls")
-  createdAt          DateTime            @default(now()) @map("created_at")
-  updatedAt          DateTime            @updatedAt @map("updated_at")
+  id                   String              @id @default(uuid())
+  userId               String              @map("user_id")
+  profileName          String              @map("profile_name")
+  parameters           Json                @db.JsonB
+  originalImageUrls    String[]            @map("original_image_urls")
+  adjustedImageUrls    String[]            @map("adjusted_image_urls")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
 
-  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  history            CorrectionHistory[]
+  // AI 스타일 프로필 (신규)
+  styleDescription     String?             @map("style_description")    // AI가 생성한 스타일 설명 텍스트
+  styleCharacteristics Json?               @db.JsonB @map("style_characteristics") // 구조화된 스타일 특성
+  referenceThumbnails  String[]            @default([]) @map("reference_thumbnails") // few-shot용 저해상도 썸네일 URLs
+
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  history              CorrectionHistory[]
 
   @@index([userId, createdAt(sort: Desc)])
   @@map("correction_profiles")

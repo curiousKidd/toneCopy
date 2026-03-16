@@ -83,6 +83,35 @@ export function extractUserId(req: Request): string {
   return req.ip || 'anonymous';
 }
 
+/**
+ * AI가 학습한 사용자 보정 스타일 프로필
+ * 단순 수치 변환값이 아닌, 보정 의도와 원칙을 담은 의미론적 프로필
+ */
+export interface StyleCharacteristics {
+  overallMood: string;         // warm | cool | neutral | cinematic | vintage | modern
+  brightnessApproach: string;  // bright | dark | natural
+  contrastLevel: string;       // high | medium | low
+  saturationStyle: string;     // vivid | muted | natural | selective
+  shadowTreatment: string;     // lifted | crushed | natural
+  highlightTreatment: string;  // preserved | blown | natural | rolled_off
+  skinToneApproach: string;    // warm | cool | natural | enhanced | not_applicable
+  colorGradingStyle: string;   // film | digital | vintage | modern | none
+  sharpnessPreference: string; // crisp | soft | natural
+  technicalNotes: string;      // 구체적 보정 패턴 관찰 메모
+  adaptationRules: string[];   // 사진 유형별 적응 규칙
+}
+
+export interface StyleProfile {
+  description: string;              // 자연어 스타일 요약 (사용자에게 보여줄 텍스트)
+  characteristics: StyleCharacteristics;
+  generatedAt: string;              // ISO timestamp
+}
+
+/**
+ * 보정 적용 모드
+ */
+export type CorrectionMode = 'adaptive_ai' | 'lut' | 'legacy_params';
+
 export interface UploadOptions {
   folder: string;
   expiresIn?: number;
